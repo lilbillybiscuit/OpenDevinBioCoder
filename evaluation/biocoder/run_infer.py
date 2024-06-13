@@ -13,7 +13,11 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 import agenthub
-from evaluation.biocoder.biocoder_env_box import BiocoderData, BiocoderSSHBox
+from evaluation.biocoder.biocoder_env_box import (
+    BiocoderData,
+    BiocoderSSHBox,
+    get_repo_without_author,
+)
 from opendevin.controller.state.state import State
 from opendevin.core.config import args, config, get_llm_config_arg
 from opendevin.core.logger import get_console_handler
@@ -119,7 +123,7 @@ def process_instance(
     reset_logger: bool = True,
 ):
     instance = BiocoderData(**instance)
-    print(instance)
+    print(instance.test_case_id)
     workspace_dir_name = (
         f'{instance.repository}__{instance.test_case_id[:10]}__{os.getpid()}'.replace(
             '/', '__'
@@ -161,9 +165,6 @@ def process_instance(
 
     # NOTE: this is something special we do for SWE-Bench due to the reason described in the previous section
     # You can omit this if you don't need to setup specialized sandbox
-    workspace_dir_name = f'{instance.repository}__{instance.test_case_id[:10]}'.replace(
-        '/', '__'
-    )
     sandbox = BiocoderSSHBox.get_box_for_instance(
         instance,
         workspace_dir_name,
@@ -176,7 +177,7 @@ def process_instance(
 
     # Prepare instruction
     instruction = (
-        f'Please complete the function "{instance.signature}" in the file /workspace/{instance.repository.split("/")[1]}/{instance.filePath}.\n'
+        f'Please complete the function "{instance.signature}" in the file /workspace/{get_repo_without_author(instance.repository)}/{instance.filePath}.\n'
         f'The environment has been set up for you to start working. You may assume all necessary tools are installed.\n'
         f'To complete the task, you must directly modify the file and fill in the function, keeping in mind that the function signature is on line {instance.lineStart-1}\n\n'
         f'The function should do the following:\n'
@@ -252,7 +253,7 @@ if __name__ == '__main__':
     # NOTE: It is preferable to load datasets from huggingface datasets and perform post-processing
     # so we don't need to manage file uploading to OpenDevin's repo
     dataset = load_dataset('lilbillbiscuit/biocoder_public')
-    biocoder_tests = dataset['test'].to_pandas()
+    biocoder_tests = dataset['train'].to_pandas()
 
     # Check https://github.com/OpenDevin/OpenDevin/blob/main/evaluation/swe_bench/README.md#configure-opendevin-and-your-llm
     # for details of how to set `llm_config`
@@ -354,7 +355,9 @@ if __name__ == '__main__':
         logger.info(
             f'Finished evaluation for instance {output["test_case_id"]}: {output["test_result"]}'
         )
-        output_fp.write(json.dumps(output) + '\n')
+        if not output['test_result'] == 'ERROR':
+            output_fp.write(json.dumps(output) + '\n')
+        logger.info(f'Finished evaluation for instance {output["test_case_id"]}: None')
         output_fp.flush()
 
     # This sets the multi-processing
@@ -364,7 +367,24 @@ if __name__ == '__main__':
     # This is SWE-Bench specific - CodeActAgent doesn't require mounted workspace to work
     skip_workspace_mount = agent_class == 'CodeActAgent'
     logger.info(f'Skipping workspace mount: {skip_workspace_mount}')
-
+    # process_instance but with an entire try/except block
+    # def process_instance_wrapper(instance, agent_class, metadata, skip_workspace_mount, eval_output_dir, reset_logger: bool = True):
+    #     try:
+    #         return process_instance(
+    #             instance,
+    #             agent_class,
+    #             metadata,
+    #             skip_workspace_mount,
+    #             eval_output_dir,
+    #             reset_logger=reset_logger,
+    #         )
+    #     except Exception as e:
+    #         logger.error(f'Error processing instance {instance.test_case_id}: {e}')
+    #         return {
+    #             "test_case_id": instance.test_case_id,
+    #             "error": str(e),
+    #             "test_result": "ERROR"
+    #         }
     try:
         with ProcessPoolExecutor(num_workers) as executor:
             futures = []

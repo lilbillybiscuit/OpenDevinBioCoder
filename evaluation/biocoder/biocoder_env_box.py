@@ -55,7 +55,6 @@ class BiocoderData:
 
 def get_likely_indent_size(array_of_tabs) -> int:
     sizes = defaultdict(int)
-
     for i in range(len(array_of_tabs) - 1):
         diff = array_of_tabs[i + 1] - array_of_tabs[i]
         if diff > 0:
@@ -63,6 +62,13 @@ def get_likely_indent_size(array_of_tabs) -> int:
     if len(sizes) == 0:
         return 4
     return int(max(sizes, key=sizes.get))
+
+
+def get_repo_without_author(repo_name):
+    if ',' in repo_name:
+        return repo_name.split(',')[1]
+    else:
+        return repo_name.split('/')[1]
 
 
 class BiocoderSSHBox(DockerSSHBox):
@@ -85,6 +91,7 @@ class BiocoderSSHBox(DockerSSHBox):
         self.skip_workspace_mount = skip_workspace_mount
         self.biocoder_cache_folder = biocoder_cache_folder
         self.first_line_after_removed = None
+        self.first_line_before_removed = None
         self.workspace_dir_name = workspace_dir_name
         self.workspace_base = config.workspace_base
         self.workspace_mount_path = config.workspace_mount_path
@@ -113,7 +120,7 @@ class BiocoderSSHBox(DockerSSHBox):
     def get_target_filepath(self):
         target_filepath = os.path.join(
             self.workspace_mount_path,
-            self.biocoder_instance.repository.split('/')[1],
+            get_repo_without_author(self.biocoder_instance.repository),
             self.biocoder_instance.filePath,
         )
         return target_filepath
@@ -126,13 +133,36 @@ class BiocoderSSHBox(DockerSSHBox):
         offset = 1 if include_signature else 0
         if self.first_line_after_removed is None:
             logger.warning('First line after removed is None')
+        if self.first_line_before_removed is None:
+            logger.warning('First line before removed is None')
         with open(target_filepath, 'r') as f:
             lines = f.read().split('\n')
             for i in range(self.biocoder_instance.lineStart - offset, len(lines)):
+                # print("LINES", lines[i], self.first_line_after_removed)
                 if lines[i].strip() == self.first_line_after_removed.strip():
-                    break
+                    if lines[i].strip() == '}':
+                        pass
+                    else:
+                        break
                 selected_lines.append(lines[i])
+        # prune all elements that are just whitespace at the end of the file
+        while len(selected_lines) > 0 and selected_lines[-1].strip() == '':
+            selected_lines.pop()
+        if self.biocoder_instance.language.lower() == 'java':
+            # if there is no } at the end of the function, add it
+            if len(selected_lines) > 0 and selected_lines[-1].strip() != '}':
+                selected_lines.append('}')
         text = '\n'.join(selected_lines)
+
+        if self.biocoder_instance.language.lower() == 'java':
+            # count number of { and add } until the number of { and } are equal
+            count = 0
+            for line in selected_lines:
+                count += line.count('{')
+                count -= line.count('}')
+            while count > 0:
+                text += '\n}'
+                count -= 1
         return text
 
     def copy_changed_code(self):
@@ -163,21 +193,39 @@ class BiocoderSSHBox(DockerSSHBox):
             indent_sizes = list(map(get_indent_size, lines))
             indent_size = get_likely_indent_size(indent_sizes)
             comment_indent_size = get_indent_size(signature_line) + indent_size
-            lines = (
-                lines[:line_start]
-                + [
+            self.first_line_before_removed = lines[line_start - 1].strip()
+            line_additional = (
+                [
                     f"{' '*comment_indent_size+comment_prefix[self.biocoder_instance.language.lower()]}TODO: replace with your code here"
                 ]
+                + (
+                    []
+                    if self.biocoder_instance.language.lower() == 'python'
+                    else ['', ' ' * get_indent_size(signature_line) + '}']
+                )
                 + ([''] * 2)
-                + lines[line_end:]
             )
-        first_line_after_removed_index = line_start
-        while len(
-            lines[first_line_after_removed_index].strip()
-        ) == 0 and first_line_after_removed_index < len(lines):
+            lines = lines[:line_start] + line_additional + lines[line_end:]
+        first_line_after_removed_index = line_start + len(line_additional)
+        # flag = False
+        while first_line_after_removed_index < len(lines) and (
+            len(lines[first_line_after_removed_index].strip()) == 0
+            or lines[first_line_after_removed_index].strip() == '}'
+        ):
+            # if lines[first_line_after_removed_index].strip() == "}":
+            #     if flag: break
+            #     flag = True
             first_line_after_removed_index += 1
-        self.first_line_after_removed = lines[first_line_after_removed_index]
-        # print("FIRST LINE AFTER REMOVED: ", self.first_line_after_removed)
+        # while (
+        #     first_line_after_removed_index < len(lines) and
+        #     (len(lines[first_line_after_removed_index].strip()) ==0)
+        # ):
+        #     first_line_after_removed_index += 1
+        if first_line_after_removed_index >= len(lines):
+            first_line_after_removed_index = len(lines) - 1
+        self.first_line_after_removed = lines[first_line_after_removed_index].strip()
+        print('FIRST LINE AFTER REMOVED: ', self.first_line_after_removed)
+        logger.info('FIRST LINE AFTER REMOVED: ' + self.first_line_after_removed)
 
         with open(target_filepath, 'w') as f:
             f.write('\n'.join(lines))
@@ -297,7 +345,7 @@ class BiocoderSSHBox(DockerSSHBox):
         logger.info(f'cd to workspace: {output}')
 
         # download repository archive
-        repository_url = f"https://biocoder.lilbillbiscuit.com/repos/{instance.repository.split('/')[1]}.zip"
+        repository_url = f'https://biocoder.lilbillbiscuit.com/repos/{get_repo_without_author(instance.repository)}.zip'
         exit_code, output = sandbox.execute_and_check(
             'wget -O repo.zip ' + repository_url, 'Failed to download the repository'
         )
@@ -324,7 +372,11 @@ class BiocoderSSHBox(DockerSSHBox):
 
 if __name__ == '__main__':
     biocoder_dataset = load_dataset('Lilbillbiscuit/biocoder_public')
-    EXAMPLE_INSTANCE = biocoder_dataset['test'][0]
+    EXAMPLE_INSTANCE = biocoder_dataset['train']
+    for item in biocoder_dataset['train']:
+        if item['language'].lower() == 'java':
+            EXAMPLE_INSTANCE = item
+            break
     EXAMPLE_INSTANCE = BiocoderData(**EXAMPLE_INSTANCE)
 
     sandbox = BiocoderSSHBox.get_box_for_instance(
